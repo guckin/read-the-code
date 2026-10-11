@@ -39,8 +39,14 @@ if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
   exit 1
 fi
 
+# Documents may be backed by a file provider that adds Finder metadata to app
+# bundles. Build in a local cache so that metadata cannot invalidate signing.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/Library/Caches/read-the-code/target}"
 npm ci
 npm run tauri -- build
+
+app_bundle="$CARGO_TARGET_DIR/release/bundle/macos/Read the Code.app"
+codesign --verify --deep --strict --verbose=2 "$app_bundle"
 
 arch="$(uname -m)"
 case "$arch" in
@@ -48,11 +54,23 @@ case "$arch" in
   x86_64) asset_name="Read-the-Code-macOS-x86_64.dmg" ;;
   *) echo "Unsupported macOS architecture: $arch" >&2; exit 1 ;;
 esac
-bundle="src-tauri/target/release/bundle/dmg/Read the Code_${version}_$(uname -m | sed 's/arm64/aarch64/').dmg"
+bundle="$CARGO_TARGET_DIR/release/bundle/dmg/Read the Code_${version}_$(uname -m | sed 's/arm64/aarch64/').dmg"
 if [[ ! -f "$bundle" ]]; then
   echo "Expected bundle not found: $bundle" >&2
   exit 1
 fi
+hdiutil verify "$bundle" >/dev/null
+
+mounted_dir="$(mktemp -d)"
+cleanup_mount() {
+  hdiutil detach "$mounted_dir" -quiet >/dev/null 2>&1 || true
+  rmdir "$mounted_dir" >/dev/null 2>&1 || true
+}
+trap cleanup_mount EXIT
+hdiutil attach "$bundle" -nobrowse -readonly -mountpoint "$mounted_dir" -quiet
+codesign --verify --deep --strict --verbose=2 "$mounted_dir/Read the Code.app"
+cleanup_mount
+trap - EXIT
 
 release_dir="$(mktemp -d)"
 trap 'rm -rf "$release_dir"' EXIT

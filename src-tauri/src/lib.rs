@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Write, path::{Component, Path, PathBuf}, process::{Command, Stdio}, sync::Mutex};
+use std::{fs, io::{Read, Write}, path::{Component, Path, PathBuf}, process::{Command, Output, Stdio}, sync::Mutex, thread, time::{Duration, Instant}};
 use tauri::{Manager, State};
+
+const REVIEW_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const MAX_REVIEW_PROMPT_BYTES: usize = 1_000_000;
+
+fn read_bounded(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, String> {
+    let mut result = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let count = reader.read(&mut buffer).map_err(|e| e.to_string())?;
+        if count == 0 { break; }
+        let remaining = limit.saturating_sub(result.len());
+        result.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    Ok(result)
+}
 
 #[derive(Default)]
 struct AppState { root: Mutex<Option<PathBuf>>, job: Mutex<Job>, comments_lock: Mutex<()> }
@@ -25,22 +40,67 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).into_owned()) }
     else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
 }
+fn execute_with_timeout(mut command: Command, input: Option<Vec<u8>>) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().ok_or("Missing CLI stdout")?;
+    let stderr = child.stderr.take().ok_or("Missing CLI stderr")?;
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, 10_000_000));
+    let stderr_reader = thread::spawn(move || read_bounded(stderr, 1_000_000));
+    let stdin_writer = input.map(|bytes| {
+        let mut stdin = child.stdin.take().expect("piped stdin configured for input");
+        thread::spawn(move || stdin.write_all(&bytes).map_err(|e| e.to_string()))
+    });
+    let deadline = Instant::now() + REVIEW_COMMAND_TIMEOUT;
+    let (status, timed_out) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break (status, false),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+            Ok(None) => {
+                let _ = child.kill();
+                break (child.wait().map_err(|e| e.to_string())?, true);
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
+    };
+    let stdout = stdout_reader.join().map_err(|_| "CLI stdout reader failed")??;
+    let stderr = stderr_reader.join().map_err(|_| "CLI stderr reader failed")??;
+    if let Some(writer) = stdin_writer {
+        writer.join().map_err(|_| "CLI stdin writer failed")??;
+    }
+    if timed_out { return Err("AI command timed out after 10 minutes".into()); }
+    Ok(Output { status, stdout, stderr })
+}
 fn root(state: &State<'_, AppState>) -> Result<PathBuf, String> {
     state.root.lock().map_err(|e| e.to_string())?.clone().ok_or("Open a Git repository first".to_string())
 }
+fn validate_relative_path(rel: &str) -> Result<(), String> {
+    let path = Path::new(rel);
+    if rel.is_empty() || path.components().any(|c| !matches!(c, Component::Normal(_)))
+        || path.components().any(|c| c.as_os_str() == ".git")
+    {
+        return Err("Invalid repository path".into());
+    }
+    Ok(())
+}
 fn safe_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    validate_relative_path(rel)?;
     let candidate = root.join(rel);
     let path = candidate.canonicalize().map_err(|e| e.to_string())?;
-    if !path.starts_with(root) || !path.is_file() { return Err("File is outside the workspace".into()); }
+    if !path.starts_with(root) || !path.is_file()
+        || path.components().any(|c| c.as_os_str() == ".git")
+    { return Err("File is outside the workspace".into()); }
     Ok(path)
 }
 fn valid_repo_path(root: &Path, rel: &str) -> Result<(), String> {
-    let path = Path::new(rel);
-    if rel.is_empty() || path.components().any(|c| !matches!(c, Component::Normal(_))) {
-        return Err("Invalid repository path".into());
-    }
+    validate_relative_path(rel)?;
     if root.join(rel).exists() { safe_path(root, rel)?; return Ok(()); }
-    git(root, &["ls-files", "--error-unmatch", "--", rel]).map(|_| ())
+    git(root, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).map(|_| ())
 }
 fn review_path(root: &Path) -> Result<PathBuf, String> {
     let path = git(root, &["rev-parse", "--git-path", "read-the-code/reviews.json"])?;
@@ -123,8 +183,8 @@ fn search_content(query: String, state: State<'_, AppState>) -> Result<Vec<Searc
 fn read_file(path: String, state: State<'_, AppState>) -> Result<FileData, String> {
     let root = root(&state)?;
     let path_on_disk = safe_path(&root, &path)?;
+    if fs::metadata(&path_on_disk).map_err(|e| e.to_string())?.len() > 3_000_000 { return Err("File is over 3 MB".into()); }
     let data = fs::read(path_on_disk).map_err(|e| e.to_string())?;
-    if data.len() > 3_000_000 { return Err("File is over 3 MB".into()); }
     if data.contains(&0) { return Err("Binary files cannot be displayed".into()); }
     let content = String::from_utf8(data).map_err(|_| "File is not UTF-8".to_string())?;
     let lines = content.lines().count().max(1);
@@ -134,23 +194,24 @@ fn read_file(path: String, state: State<'_, AppState>) -> Result<FileData, Strin
 fn read_diff(path: String, staged: bool, state: State<'_, AppState>) -> Result<String, String> {
     let root = root(&state)?;
     valid_repo_path(&root, &path)?;
-    let mut args = vec!["diff", "--no-ext-diff", "--no-color"];
+    let mut args = vec!["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color"];
     if staged { args.push("--cached"); }
     args.extend(["--", &path]);
     let diff = git(&root, &args)?;
     if !diff.is_empty() || staged { return Ok(diff); }
     // An untracked file has no regular git diff. Build a normal unified diff without a shell.
-    let tracked = git(&root, &["ls-files", "--error-unmatch", "--", &path]).is_ok();
+    let tracked = git(&root, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", &path]).is_ok();
     if tracked { return Ok(diff); }
-    let out = Command::new("git").args(["diff", "--no-index", "--no-color", "--", "/dev/null", &path]).current_dir(&root).output().map_err(|e| e.to_string())?;
+    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let out = Command::new("git").args(["diff", "--no-index", "--no-color", "--", null_device, &path]).current_dir(&root).output().map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 #[tauri::command]
 fn stage_file(path: String, stage: bool, state: State<'_, AppState>) -> Result<Workspace, String> {
     let root = root(&state)?;
     valid_repo_path(&root, &path)?;
-    if stage { git(&root, &["add", "--", &path])?; }
-    else { git(&root, &["restore", "--staged", "--", &path])?; }
+    if stage { git(&root, &["--literal-pathspecs", "add", "--", &path])?; }
+    else { git(&root, &["--literal-pathspecs", "restore", "--staged", "--", &path])?; }
     snapshot(&root)
 }
 #[tauri::command]
@@ -187,13 +248,14 @@ fn send_review(provider: String, session_id: String, executable: Option<String>,
     };
     if pending.is_empty() { return Err("There are no unsent comments".into()); }
     let workspace_root = root.to_string_lossy().into_owned();
+    let prompt = format!("Please address this batch of local code review comments in the current repository. Inspect the referenced code and diffs, verify each line against the included excerpt because code may have moved, make the requested changes, and summarize what you changed. Comments:\n\n{}", pending.iter().enumerate().map(|(i,c)| format!("{}. {}:{} [{}]{}\n{}", i+1, c.path, c.line, c.side, c.anchor.as_deref().map(|a| format!("\nCode at review time: {a}")).unwrap_or_default(), c.body)).collect::<Vec<_>>().join("\n\n"));
+    if prompt.len() > MAX_REVIEW_PROMPT_BYTES { return Err("Review batch is over 1 MB; split it into smaller batches".into()); }
     {
         let mut job = state.job.lock().map_err(|e| e.to_string())?;
         if job.running { return Err("A review is already running".into()); }
         *job = Job { running: true, message: "Sending review to AI session…".into(), output: String::new(), workspace_root: Some(workspace_root) };
     }
     std::thread::spawn(move || {
-        let prompt = format!("Please address this batch of local code review comments in the current repository. Inspect the referenced code and diffs, verify each line against the included excerpt because code may have moved, make the requested changes, and summarize what you changed. Comments:\n\n{}", pending.iter().enumerate().map(|(i,c)| format!("{}. {}:{} [{}]\n{}{}", i+1, c.path, c.line, c.side, c.anchor.as_deref().map(|a| format!("\nCode at review time: {a}")).unwrap_or_default(), c.body)).collect::<Vec<_>>().join("\n\n"));
         let result = (|| -> Result<String, String> {
             let bundled_codex = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex";
             let program = executable.as_deref().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| {
@@ -203,8 +265,9 @@ fn send_review(provider: String, session_id: String, executable: Option<String>,
                 { bundled_codex } else if provider.starts_with("codex") { "codex" } else { "claude" }
             });
             if provider == "codex-app" {
-                let out = Command::new(program).args(["queue", "--thread", &session_id, "--message", &prompt])
-                    .current_dir(&root).output().map_err(|e| format!("Could not start Codex CLI: {e}"))?;
+                let mut command = Command::new(program);
+                command.args(["queue", "--thread", &session_id, "--message", &prompt]).current_dir(&root);
+                let out = execute_with_timeout(command, None).map_err(|e| format!("Could not run Codex CLI: {e}"))?;
                 let output = String::from_utf8_lossy(&out.stdout).into_owned();
                 if !out.status.success() { return Err(format!("{output}\n{}", String::from_utf8_lossy(&out.stderr))); }
                 return Ok(output);
@@ -214,9 +277,8 @@ fn send_review(provider: String, session_id: String, executable: Option<String>,
             } else {
                 let mut c = Command::new(program); c.args(["--print", "--resume", &session_id]); c
             };
-            let mut child = cmd.current_dir(&root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("Could not start {provider} CLI: {e}"))?;
-            child.stdin.take().ok_or("Missing CLI stdin")?.write_all(prompt.as_bytes()).map_err(|e| e.to_string())?;
-            let out = child.wait_with_output().map_err(|e| e.to_string())?;
+            cmd.current_dir(&root);
+            let out = execute_with_timeout(cmd, Some(prompt.into_bytes())).map_err(|e| format!("Could not run {provider} CLI: {e}"))?;
             let output = String::from_utf8_lossy(&out.stdout).into_owned();
             if !out.status.success() { return Err(format!("{output}\n{}", String::from_utf8_lossy(&out.stderr))); }
             Ok(output)
