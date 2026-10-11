@@ -1,0 +1,54 @@
+export type Change = { path: string; index: string; worktree: string };
+export type Comment = {
+  id: string;
+  path: string;
+  line: number;
+  side: string;
+  body: string;
+  createdAt: string;
+  sent: boolean;
+  anchor?: string | null;
+};
+export type Workspace = {
+  root: string;
+  branch: string;
+  files: string[];
+  changes: Change[];
+  comments: Comment[];
+};
+export type FileData = { path: string; content: string; lines: number };
+export type Job = {
+  running: boolean;
+  message: string;
+  output: string;
+  workspaceRoot?: string | null;
+};
+export type SearchHit = { path: string; line: number; text: string };
+export type Mode = 'file' | 'diff';
+export type AppState = {
+  ws: Workspace | null;
+  file: FileData | null;
+  active: string | null;
+  mode: Mode;
+  staged: boolean;
+  diff: string;
+  preview: boolean;
+  tabs: string[];
+  history: string[];
+  historyAt: number;
+  quick: boolean;
+  query: string;
+  results: SearchHit[];
+  find: boolean;
+  findQuery: string;
+  selectedLine: number;
+  selectedSide: string;
+  showComposer: boolean;
+  showSend: boolean;
+  draft: string;
+  sidebar: boolean;
+  panel: 'files' | 'changes' | 'review';
+  job: Job | null;
+  toast: string;
+  shortcuts: boolean;
+};
