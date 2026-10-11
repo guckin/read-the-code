@@ -1,74 +1,567 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
-import hljs from 'highlight.js/lib/core';
-import javascript from 'highlight.js/lib/languages/javascript';
-import typescript from 'highlight.js/lib/languages/typescript';
-import rust from 'highlight.js/lib/languages/rust';
-import json from 'highlight.js/lib/languages/json';
-import python from 'highlight.js/lib/languages/python';
-import bash from 'highlight.js/lib/languages/bash';
-import css from 'highlight.js/lib/languages/css';
-import xml from 'highlight.js/lib/languages/xml';
-import 'highlight.js/styles/github-dark.css';
 import './style.css';
+import { renderView } from './view';
+import type { AppState, Comment, FileData, Job, SearchHit, Workspace } from './types';
+import { basename, esc, ext } from './helpers';
 
-for (const [name, grammar] of Object.entries({ javascript, typescript, rust, json, python, bash, css, xml })) hljs.registerLanguage(name, grammar);
-type Change = {path:string; index:string; worktree:string};
-type Comment = {id:string; path:string; line:number; side:string; body:string; createdAt:string; sent:boolean};
-type Workspace = {root:string; branch:string; files:string[]; changes:Change[]; comments:Comment[]};
-type FileData = {path:string; content:string; lines:number};
-type Job = {running:boolean; message:string; output:string};
-type SearchHit = {path:string; line:number; text:string};
-type Mode = 'file'|'diff';
 const app = document.querySelector<HTMLDivElement>('#app')!;
-const s:{ws:Workspace|null; file:FileData|null; active:string|null; mode:Mode; staged:boolean; diff:string; preview:boolean; tabs:string[]; history:string[]; historyAt:number; quick:boolean; query:string; results:SearchHit[]; find:boolean; findQuery:string; selectedLine:number; selectedSide:string; showComposer:boolean; showSend:boolean; draft:string; sidebar:boolean; panel:'files'|'changes'|'review'; job:Job|null; toast:string; shortcuts:boolean} = {
-  ws:null,file:null,active:null,mode:'file',staged:false,diff:'',preview:true,tabs:[],history:[],historyAt:-1,quick:false,query:'',results:[],find:false,findQuery:'',selectedLine:1,selectedSide:'file',showComposer:false,showSend:false,draft:'',sidebar:true,panel:'files',job:null,toast:'',shortcuts:false
+const s: AppState = {
+  ws: null,
+  file: null,
+  active: null,
+  mode: 'file',
+  staged: false,
+  diff: '',
+  preview: true,
+  tabs: [],
+  history: [],
+  historyAt: -1,
+  quick: false,
+  query: '',
+  results: [],
+  find: false,
+  findQuery: '',
+  selectedLine: 1,
+  selectedSide: 'file',
+  showComposer: false,
+  showSend: false,
+  draft: '',
+  sidebar: true,
+  panel: 'files',
+  job: null,
+  toast: '',
+  shortcuts: false,
 };
-const esc=(v:string)=>v.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
-const basename=(p:string)=>p.split('/').pop()||p;
-const ext=(p:string)=>p.split('.').pop()?.toLowerCase()||'';
-const lang=(p:string)=>({ts:'typescript',tsx:'typescript',js:'javascript',jsx:'javascript',rs:'rust',py:'python',json:'json',sh:'bash',css:'css',html:'xml',xml:'xml'} as Record<string,string>)[ext(p)];
-const highlight=(v:string,p:string)=>{try{return lang(p)?hljs.highlight(v,{language:lang(p)}).value:esc(v)}catch{return esc(v)}};
-const changed=(p:string)=>s.ws?.changes.find(c=>c.path===p);
-const pending=()=>s.ws?.comments.filter(c=>!c.sent)||[];
-const notice=(m:string)=>{s.toast=m; render(); setTimeout(()=>{if(s.toast===m){s.toast='';render()}},4500)};
-async function refresh(){if(!s.ws)return;try{s.ws=await invoke<Workspace>('refresh_workspace');render()}catch(e){notice(String(e))}}
-async function choose(){const path=await open({directory:true,multiple:false});if(typeof path==='string')await openWorkspace(path)}
-async function openWorkspace(path:string){try{s.ws=await invoke<Workspace>('open_workspace',{path});localStorage.setItem('rtc-root',path);s.active=null;s.file=null;s.tabs=[];s.history=[];s.historyAt=-1;render()}catch(e){notice(String(e))}}
-async function openFile(path:string, record=true){if(!s.ws)return;try{s.file=await invoke<FileData>('read_file',{path});s.active=path;s.mode='file';s.preview=true;s.selectedLine=1;s.selectedSide='file';if(!s.tabs.includes(path))s.tabs.push(path);if(record){s.history=s.history.slice(0,s.historyAt+1);s.history.push(path);s.historyAt=s.history.length-1} s.quick=false;s.query='';render()}catch(e){notice(String(e))}}
-async function showDiff(path:string,staged=false){if(s.active!==path){try{await openFile(path)}catch{}s.active=path;if(!s.file||s.file.path!==path)s.file={path,content:'',lines:1};if(!s.tabs.includes(path))s.tabs.push(path)}s.mode='diff';s.staged=staged;s.selectedLine=1;s.selectedSide='new';try{s.diff=await invoke<string>('read_diff',{path,staged});render()}catch(e){notice(String(e))}}
-async function stage(path:string,stage:boolean){try{s.ws=await invoke<Workspace>('stage_file',{path,stage});render();notice(stage?'Staged '+basename(path):'Unstaged '+basename(path))}catch(e){notice(String(e))}}
-function navigate(delta:number){const next=s.historyAt+delta;if(next>=0&&next<s.history.length){s.historyAt=next;openFile(s.history[next],false)}}
-function switchTab(delta:number){if(!s.active||!s.tabs.length)return;const i=s.tabs.indexOf(s.active);openFile(s.tabs[(i+delta+s.tabs.length)%s.tabs.length])}
-function closeTab(path:string){const i=s.tabs.indexOf(path);s.tabs=s.tabs.filter(p=>p!==path);if(s.active===path){const next=s.tabs[Math.max(0,i-1)];if(next)openFile(next);else{s.active=null;s.file=null;render()}}else render()}
-function fileTree(){if(!s.ws)return '';const q=s.query.toLowerCase();let files=s.ws.files.filter(f=>!q||f.toLowerCase().includes(q));return files.slice(0,2500).map(p=>`<button class="tree-item ${p===s.active?'active':''}" data-open="${esc(p)}" title="${esc(p)}"><span class="file-icon">${ext(p)==='md'?'▤':'◇'}</span><span class="tree-path">${esc(p)}</span>${changed(p)?'<span class="change-dot"></span>':''}</button>`).join('') || '<div class="empty-small">No matching files</div>'}
-function changesList(){if(!s.ws)return '';return s.ws.changes.map(c=>`<div class="change-item"><button data-diff="${esc(c.path)}" title="Open diff"><span class="status">${c.index==='?'?'U':c.worktree==='M'?'M':c.index.trim()||c.worktree.trim()}</span><span class="change-name">${esc(c.path)}</span></button><button class="tiny" data-stage="${esc(c.path)}" title="Stage">${c.index.trim()&&c.index!=='?'?'−':'+'}</button></div>`).join('')||'<div class="empty-small">Working tree is clean</div>'}
-function commentsList(){const comments=s.ws?.comments||[];return comments.map(c=>`<div class="comment-card ${c.sent?'sent':''}"><div class="comment-meta"><button data-jump="${esc(c.path)}:${c.line}">${esc(c.path)}:${c.line}</button><span>${c.sent?'Sent':'Queued'}</span></div><p>${esc(c.body)}</p>${!c.sent?`<button class="text-button" data-delete="${esc(c.id)}">Remove</button>`:''}</div>`).join('')||'<div class="empty-small">Select a line to add a review comment.</div>'}
-function codeLines(content:string,p:string){return content.split('\n').map((line,i)=>`<div class="code-row ${s.selectedLine===i+1&&s.mode==='file'?'selected':''}" data-line="${i+1}" data-side="file"><span class="line-no">${i+1}</span><code>${highlight(line,p)||' '}</code></div>`).join('')}
-function diffLines(diff:string){let old=0,newline=0;return diff.split('\n').map(line=>{let cls='context', side='new',n=0;if(line.startsWith('@@')){const m=line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/);if(m){old=+m[1];newline=+m[2]}cls='hunk'}else if(line.startsWith('+++')||line.startsWith('---')||line.startsWith('diff ')||line.startsWith('index ')){cls='meta'}else if(line.startsWith('+')){cls='add';n=newline++}else if(line.startsWith('-')){cls='remove';side='old';n=old++}else{n=newline++;old++}return `<div class="code-row diff-row ${cls} ${s.selectedLine===n&&s.selectedSide===side?'selected':''}" ${n?`data-line="${n}" data-side="${side}"`:''}><span class="line-no">${n||''}</span><code>${esc(line)||' '}</code></div>`}).join('')}
-function editor(){if(!s.active||!s.file)return `<div class="welcome"><div class="welcome-mark">⌘</div><h1>Read the Code</h1><p>Open a repository, navigate the code, inspect changes, and queue review comments for your AI session.</p><button class="primary" data-action="open">Open repository</button><div class="welcome-keys"><span>Shift Shift <b>Search Everywhere</b></span><span>⌘F <b>Find in file</b></span><span>⌃Tab <b>Switch files</b></span></div></div>`;
- const p=s.active;let body='';if(s.mode==='diff'){body=s.diff?diffLines(s.diff):'<div class="empty-small">No diff on this side. Try the other diff view.</div>'}else if(ext(p)==='md'&&s.preview){body=`<div class="markdown">${DOMPurify.sanitize(marked.parse(s.file.content,{async:false}) as string)}</div>`}else{body=`<div class="code">${codeLines(s.file.content,p)}</div>`}
- return `<div class="file-toolbar"><div class="breadcrumbs">${esc(s.ws?.root.split('/').pop()||'')} <span>›</span> ${esc(p)}</div><div class="toolbar-actions"><button class="pill ${s.mode==='file'&&!s.preview?'on':''}" data-action="file">Source</button>${ext(p)==='md'?`<button class="pill ${s.mode==='file'&&s.preview?'on':''}" data-action="preview">Preview</button>`:''}<button class="pill ${s.mode==='diff'&&!s.staged?'on':''}" data-action="diff">Working diff</button><button class="pill ${s.mode==='diff'&&s.staged?'on':''}" data-action="staged-diff">Staged diff</button><button class="subtle" data-action="comment">+ Comment</button></div></div><div class="editor-scroll" id="editor-scroll">${body}</div><div class="file-footer"><span>${esc(p)}</span><span>${s.mode==='file'?`${s.file.lines} lines`:'Click a changed line to comment'} · UTF-8 · Read only</span></div>`;
+
+const changed = (path: string) => s.ws?.changes.find((change) => change.path === path);
+const pending = () => s.ws?.comments.filter((comment) => !comment.sent) || [];
+function render() {
+  renderView(s, findNext);
 }
-function quick(){if(!s.quick)return '';const q=s.query.toLowerCase();const searching=q.startsWith('#');const list=s.ws?.files.filter(f=>!searching&&f.toLowerCase().includes(q)).slice(0,40)||[];const rows=searching?s.results.map((h,i)=>`<button class="palette-result ${i===0?'first':''}" data-result="${esc(h.path)}:${h.line}"><span>⌕</span><span>${esc(basename(h.path))}:${h.line}<small>${esc(h.text)}</small></span></button>`).join(''):list.map((p,i)=>`<button class="palette-result ${i===0?'first':''}" data-open="${esc(p)}"><span>◇</span><span>${esc(basename(p))}<small>${esc(p)}</small></span></button>`).join('');return `<div class="scrim" data-action="close-overlay"><div class="palette"><div class="palette-input"><span>⌕</span><input id="quick-input" placeholder="Search files, or # text in code…" value="${esc(s.query)}" autocomplete="off"/></div><div class="palette-results">${rows||'<div class="empty-small">No matches</div>'}</div><div class="palette-tip">Prefix # to search code · ↵ Open · Esc Close</div></div></div>`}
-function composer(){if(!s.showComposer||!s.active)return '';return `<div class="scrim" data-action="close-overlay"><div class="composer"><div class="composer-heading"><h2>Comment on code</h2><span>${esc(s.active)}:${s.selectedLine} ${s.selectedSide==='old'?'(old)':''}</span></div><textarea id="comment-body" placeholder="What should the AI change or explain?">${esc(s.draft)}</textarea><div class="composer-footer"><span>Queued locally until you send the review</span><button class="primary" data-action="save-comment">Add comment</button></div></div></div>`}
-function sendDialog(){if(!s.showSend)return '';const provider=localStorage.getItem('rtc-provider')||'codex-app';return `<div class="scrim" data-action="close-overlay"><div class="composer send-dialog"><h2>Send local review</h2><p>${pending().length} queued comment${pending().length===1?'':'s'} will be sent together. The session can then make changes in this repository.</p><label>AI provider<select id="provider"><option value="codex-app" ${provider==='codex-app'?'selected':''}>Codex app chat</option><option value="codex" ${provider==='codex'?'selected':''}>Codex CLI session</option><option value="claude" ${provider==='claude'?'selected':''}>Claude Code</option></select></label><label>Session ID<input id="session-id" placeholder="Paste the Codex chat or CLI session ID" value="${esc(localStorage.getItem('rtc-session')||'')}"/></label><label>CLI executable path <small>(optional if on PATH)</small><input id="executable" placeholder="/path/to/codex or claude" value="${esc(localStorage.getItem('rtc-executable')||'')}"/></label><div class="composer-footer"><span>Comments remain queued if delivery fails</span><button class="primary" data-action="dispatch">Send ${pending().length} comments</button></div></div></div>`}
-function shortcuts(){if(!s.shortcuts)return '';return `<div class="scrim" data-action="close-overlay"><div class="shortcuts"><h2>Keyboard shortcuts</h2><p>Based on your Pawnk bindings and IntelliJ navigation.</p>${[['Shift Shift','Search Everywhere'],['⌘F','Find in file'],['⌘L','Toggle file tree'],['⌘⇧O','Open repository'],['⌃Tab / ⌃⇧Tab','Next / previous file'],['⌘⌥← / ⌘⌥→','Back / forward'],['⌘W','Close file'],['⌘/','Keyboard shortcuts'],['Esc','Close dialog']].map(([k,v])=>`<div><span>${v}</span><kbd>${k}</kbd></div>`).join('')}</div></div>`}
-function render(){const count=pending().length;app.innerHTML=`<div class="shell"><header class="topbar"><div class="brand"><span class="brand-symbol">⌘</span><span>Read the Code</span></div><button class="workspace-picker" data-action="open"><span class="branch-icon">⌁</span><span>${s.ws?esc(s.ws.root.split('/').pop()||s.ws.root):'Open a repository'}</span><span class="chevron">⌄</span></button><div class="top-spacer"></div><button class="search-trigger" data-action="quick"><span>⌕ &nbsp;Search Everywhere</span><kbd>⇧ ⇧</kbd></button><button class="icon-button" data-action="refresh" title="Refresh">↻</button><button class="icon-button" data-action="shortcuts" title="Keyboard shortcuts">?</button></header><div class="main-area">${s.sidebar?`<aside class="sidebar"><div class="sidebar-tabs"><button class="${s.panel==='files'?'active':''}" data-panel="files">Files</button><button class="${s.panel==='changes'?'active':''}" data-panel="changes">Changes ${s.ws?.changes.length?`<em>${s.ws.changes.length}</em>`:''}</button><button class="${s.panel==='review'?'active':''}" data-panel="review">Review ${count?`<em>${count}</em>`:''}</button></div><div class="sidebar-content">${s.panel==='files'?`<div class="sidebar-title">EXPLORER</div><input id="filter-files" placeholder="Filter files…" value="${!s.quick?esc(s.query):''}"/>${fileTree()}`:s.panel==='changes'?`<div class="sidebar-title">WORKING TREE <button data-action="refresh">↻</button></div>${changesList()}`:`<div class="sidebar-title">REVIEW QUEUE</div>${commentsList()}${s.job?.output?`<div class=\"ai-output\"><b>AI response</b><pre>${esc(s.job.output)}</pre></div>`:''}`}</div></aside>`:''}<section class="content"><div class="tabs"><button class="sidebar-toggle" data-action="sidebar" title="Toggle sidebar">☷</button>${s.tabs.map(p=>`<div class="tab ${p===s.active?'active':''}"><button data-open="${esc(p)}">${changed(p)?'<span class="tab-dot"></span>':''}${esc(basename(p))}</button><button class="tab-close" data-close="${esc(p)}">×</button></div>`).join('')}</div>${editor()}</section></div><footer class="bottom-bar"><span>${s.ws?`<span class="branch-icon">⌁</span> ${esc(s.ws.branch||'detached')}`:'No repository'}</span><span class="footer-center">${s.job?.running?'AI review in progress…':s.job?.message?esc(s.job.message):'Local review · comments stay here until sent'}</span><button class="review-button" data-action="send">Send review ${count?`<b>${count}</b>`:''}</button></footer></div>${quick()}${composer()}${sendDialog()}${shortcuts()}${s.toast?`<div class="toast">${esc(s.toast)}</div>`:''}`;
- if(s.quick){const input=document.querySelector<HTMLInputElement>('#quick-input');input?.focus();input?.setSelectionRange(input.value.length,input.value.length)}
- if(s.showComposer)document.querySelector<HTMLTextAreaElement>('#comment-body')?.focus();
- if(s.find){let box=document.querySelector<HTMLInputElement>('#find-box');if(!box){const bar=document.createElement('div');bar.className='find-bar';bar.innerHTML='<input id="find-box" placeholder="Find in file…"/><button id="find-next">Next ↵</button><button id="find-close">×</button>';document.querySelector('.content')?.appendChild(bar);box=bar.querySelector<HTMLInputElement>('input')!;box.value=s.findQuery;bar.querySelector('#find-next')?.addEventListener('click',findNext);bar.querySelector('#find-close')?.addEventListener('click',()=>{s.find=false;render()});box.addEventListener('input',()=>{s.findQuery=box!.value;findNext()});box.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();findNext()}})}box.focus()}
+const notice = (m: string) => {
+  s.toast = m;
+  render();
+  setTimeout(() => {
+    if (s.toast === m) {
+      s.toast = '';
+      render();
+    }
+  }, 4500);
+};
+async function refresh() {
+  if (!s.ws) return;
+  try {
+    s.ws = await invoke<Workspace>('refresh_workspace');
+    render();
+  } catch (e) {
+    notice(String(e));
+  }
 }
-function findNext(){if(!s.file||!s.findQuery)return;const rows=s.file.content.split('\n');const start=s.selectedLine;for(let j=0;j<rows.length;j++){const i=(start+j)%rows.length;if(rows[i].toLowerCase().includes(s.findQuery.toLowerCase())){s.selectedLine=i+1;document.querySelector(`[data-line="${i+1}"]`)?.scrollIntoView({block:'center'});document.querySelectorAll('.code-row').forEach(el=>el.classList.toggle('selected',el.getAttribute('data-line')===String(i+1)));break}}}
-async function sendReview(){if(!s.ws){notice('Open a repository first');return}if(!pending().length){s.panel='review';render();notice('Add a comment before sending');return}s.showSend=true;render()}
-async function dispatchReview(){const p=document.querySelector<HTMLSelectElement>('#provider')?.value||'codex-app';const session=document.querySelector<HTMLInputElement>('#session-id')?.value.trim()||'';if(!session){notice('Enter the session ID');return}localStorage.setItem('rtc-provider',p);localStorage.setItem('rtc-session',session);const executable=document.querySelector<HTMLInputElement>('#executable')?.value.trim()||'';localStorage.setItem('rtc-executable',executable);try{await invoke('send_review',{provider:p,sessionId:session,executable:executable||null});s.showSend=false;s.job={running:true,message:'Sending review to AI session…',output:''};render();pollJob()}catch(e){notice(String(e))}}
-async function pollJob(){const timer=setInterval(async()=>{try{s.job=await invoke<Job>('job_status');if(!s.job.running){clearInterval(timer);await refresh();notice(s.job.message);if(s.job.output)console.info('AI review response:',s.job.output)}else render()}catch(e){clearInterval(timer);notice(String(e))}},1200)}
-app.addEventListener('click',async e=>{const t=(e.target as HTMLElement).closest<HTMLElement>('[data-action],[data-open],[data-diff],[data-stage],[data-close],[data-panel],[data-delete],[data-jump],[data-result],[data-line]');if(!t)return;if(t.dataset.open){await openFile(t.dataset.open);return}if(t.dataset.diff){await showDiff(t.dataset.diff);return}if(t.dataset.stage){await stage(t.dataset.stage,!(changed(t.dataset.stage)?.index.trim()&&changed(t.dataset.stage)?.index!=='?'));return}if(t.dataset.close){closeTab(t.dataset.close);return}if(t.dataset.panel){s.panel=t.dataset.panel as typeof s.panel;render();return}if(t.dataset.delete){try{s.ws!.comments=await invoke<Comment[]>('delete_comment',{id:t.dataset.delete});render()}catch(e){notice(String(e))}return}if(t.dataset.result){const m=t.dataset.result.match(/^(.*):(\d+)$/);if(m){await openFile(m[1]);s.selectedLine=+m[2];render();document.querySelector(`[data-line=\"${m[2]}\"]`)?.scrollIntoView({block:'center'})}return}if(t.dataset.jump){const m=t.dataset.jump.match(/^(.*):(\d+)$/);if(m){await openFile(m[1]);s.selectedLine=+m[2];render();document.querySelector(`[data-line="${m[2]}"]`)?.scrollIntoView({block:'center'})}return}if(t.dataset.line){s.selectedLine=+t.dataset.line;s.selectedSide=t.dataset.side||'file';document.querySelectorAll('.code-row.selected').forEach(el=>el.classList.remove('selected'));t.classList.add('selected');return}switch(t.dataset.action){case 'open':await choose();break;case 'refresh':await refresh();if(s.mode==='diff'&&s.active)await showDiff(s.active,s.staged);break;case 'sidebar':s.sidebar=!s.sidebar;render();break;case 'quick':s.quick=true;s.query='';render();break;case 'shortcuts':s.shortcuts=true;render();break;case 'file':s.mode='file';s.preview=false;render();break;case 'preview':s.mode='file';s.preview=true;render();break;case 'diff':if(s.active)await showDiff(s.active);break;case 'staged-diff':if(s.active)await showDiff(s.active,true);break;case 'comment':if(ext(s.active||'')==='md'&&s.preview){s.preview=false;s.mode='file'}s.showComposer=true;s.draft='';render();break;case 'save-comment':{s.draft=document.querySelector<HTMLTextAreaElement>('#comment-body')?.value||'';if(!s.draft.trim()){notice('Write a comment first');return}try{s.ws!.comments=await invoke<Comment[]>('add_comment',{path:s.active,line:s.selectedLine,side:s.selectedSide,body:s.draft});s.showComposer=false;s.panel='review';s.draft='';render()}catch(e){notice(String(e))}break}case 'send':await sendReview();break;case 'dispatch':await dispatchReview();break;case 'close-overlay':if(e.target!==t)break;s.quick=false;s.showComposer=false;s.showSend=false;s.shortcuts=false;s.find=false;render();break;}});
-app.addEventListener('input',e=>{const t=e.target as HTMLInputElement;if(t.id==='quick-input'){s.query=t.value;if(t.value.startsWith('#')){searchCode(t.value.slice(1));document.querySelector('.palette-results')!.innerHTML='<div class="empty-small">Searching code…</div>'}else{const list=s.ws?.files.filter(f=>f.toLowerCase().includes(s.query.toLowerCase())).slice(0,40)||[];document.querySelector('.palette-results')!.innerHTML=list.map((p,i)=>`<button class="palette-result ${i===0?'first':''}" data-open="${esc(p)}"><span>◇</span><span>${esc(basename(p))}<small>${esc(p)}</small></span></button>`).join('')||'<div class="empty-small">No files found</div>'}}if(t.id==='filter-files'){s.query=t.value;document.querySelector('.sidebar-content')!.querySelectorAll('.tree-item').forEach(el=>el.remove());document.querySelector('.sidebar-content')!.insertAdjacentHTML('beforeend',fileTree())}});
-let searchSerial=0;
-async function searchCode(q:string){const id=++searchSerial;if(q.trim().length<2){s.results=[];render();return}try{const results=await invoke<SearchHit[]>('search_content',{query:q});if(id===searchSerial&&s.quick){s.results=results;const input=document.querySelector<HTMLInputElement>('#quick-input');const pos=input?.selectionStart||0;render();const next=document.querySelector<HTMLInputElement>('#quick-input');next?.setSelectionRange(pos,pos)}}catch(e){if(id===searchSerial)notice(String(e))}}
-let lastShift=0;
-window.addEventListener('keydown',e=>{const mod=navigator.platform.includes('Mac')?e.metaKey:e.ctrlKey;const isInput=(e.target as HTMLElement)?.matches('input,textarea');if(e.key==='Shift'&&!e.repeat){const now=Date.now();if(now-lastShift<420){e.preventDefault();s.quick=true;s.query='';render();lastShift=0}else lastShift=now;return}if(e.key==='Escape'){s.quick=false;s.showComposer=false;s.showSend=false;s.shortcuts=false;s.find=false;render();return}if(s.quick){if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();const items=Array.from(document.querySelectorAll<HTMLElement>('.palette-result'));if(items.length){const current=Math.max(0,items.findIndex(i=>i.classList.contains('first')));items[current].classList.remove('first');const next=(current+(e.key==='ArrowDown'?1:-1)+items.length)%items.length;items[next].classList.add('first');items[next].scrollIntoView({block:'nearest'})}return}if(e.key==='Enter'){e.preventDefault();const first=document.querySelector<HTMLElement>('.palette-result.first');const p=first?.dataset.open;if(p)openFile(p);else first?.click()}return}if(isInput&&e.key!=='Tab')return;if(e.key==='F12'){e.preventDefault();const word=window.getSelection()?.toString().trim();if(word){s.quick=true;s.query='#'+word;s.results=[];render();searchCode(word)}return}if(mod&&e.key.toLowerCase()==='f'){e.preventDefault();s.find=true;render();return}if(mod&&e.key.toLowerCase()==='l'){e.preventDefault();s.sidebar=!s.sidebar;render();return}if(mod&&e.key==='/'){e.preventDefault();s.shortcuts=true;render();return}if(mod&&e.key.toLowerCase()==='w'){e.preventDefault();if(s.active)closeTab(s.active);return}if(e.ctrlKey&&e.key==='Tab'){e.preventDefault();switchTab(e.shiftKey?-1:1);return}if(mod&&e.altKey&&e.key==='ArrowLeft'){e.preventDefault();navigate(-1);return}if(mod&&e.altKey&&e.key==='ArrowRight'){e.preventDefault();navigate(1);return}if(mod&&e.key.toLowerCase()==='o'){e.preventDefault();choose()}});
-render();const saved=localStorage.getItem('rtc-root');if(saved)openWorkspace(saved);
+async function choose() {
+  const path = await open({ directory: true, multiple: false });
+  if (typeof path === 'string') await openWorkspace(path);
+}
+async function openWorkspace(path: string) {
+  try {
+    s.ws = await invoke<Workspace>('open_workspace', { path });
+    localStorage.setItem('rtc-root', path);
+    s.active = null;
+    s.file = null;
+    s.tabs = [];
+    s.history = [];
+    s.historyAt = -1;
+    render();
+  } catch (e) {
+    notice(String(e));
+  }
+}
+async function openFile(path: string, record = true) {
+  if (!s.ws) return;
+  try {
+    s.file = await invoke<FileData>('read_file', { path });
+    s.active = path;
+    s.mode = 'file';
+    s.preview = true;
+    s.selectedLine = 1;
+    s.selectedSide = 'file';
+    if (!s.tabs.includes(path)) s.tabs.push(path);
+    if (record) {
+      s.history = s.history.slice(0, s.historyAt + 1);
+      s.history.push(path);
+      s.historyAt = s.history.length - 1;
+    }
+    s.quick = false;
+    s.query = '';
+    render();
+  } catch (e) {
+    notice(String(e));
+  }
+}
+async function showDiff(path: string, staged = false) {
+  if (s.active !== path) {
+    try {
+      await openFile(path);
+    } catch {}
+    s.active = path;
+    if (!s.file || s.file.path !== path) s.file = { path, content: '', lines: 1 };
+    if (!s.tabs.includes(path)) s.tabs.push(path);
+  }
+  s.mode = 'diff';
+  s.staged = staged;
+  s.selectedLine = 1;
+  s.selectedSide = 'new';
+  try {
+    s.diff = await invoke<string>('read_diff', { path, staged });
+    render();
+  } catch (e) {
+    notice(String(e));
+  }
+}
+async function stage(path: string, stage: boolean) {
+  try {
+    s.ws = await invoke<Workspace>('stage_file', { path, stage });
+    render();
+    notice(stage ? 'Staged ' + basename(path) : 'Unstaged ' + basename(path));
+  } catch (e) {
+    notice(String(e));
+  }
+}
+function navigate(delta: number) {
+  const next = s.historyAt + delta;
+  if (next >= 0 && next < s.history.length) {
+    s.historyAt = next;
+    openFile(s.history[next], false);
+  }
+}
+function switchTab(delta: number) {
+  if (!s.active || !s.tabs.length) return;
+  const i = s.tabs.indexOf(s.active);
+  openFile(s.tabs[(i + delta + s.tabs.length) % s.tabs.length]);
+}
+function closeTab(path: string) {
+  const i = s.tabs.indexOf(path);
+  s.tabs = s.tabs.filter((p) => p !== path);
+  if (s.active === path) {
+    const next = s.tabs[Math.max(0, i - 1)];
+    if (next) openFile(next);
+    else {
+      s.active = null;
+      s.file = null;
+      render();
+    }
+  } else render();
+}
+function findNext() {
+  if (!s.file || !s.findQuery) return;
+  const rows = s.file.content.split('\n');
+  const start = s.selectedLine;
+  for (let j = 0; j < rows.length; j++) {
+    const i = (start + j) % rows.length;
+    if (rows[i].toLowerCase().includes(s.findQuery.toLowerCase())) {
+      s.selectedLine = i + 1;
+      document.querySelector(`[data-line="${i + 1}"]`)?.scrollIntoView({ block: 'center' });
+      document
+        .querySelectorAll('.code-row')
+        .forEach((el) =>
+          el.classList.toggle('selected', el.getAttribute('data-line') === String(i + 1)),
+        );
+      break;
+    }
+  }
+}
+async function sendReview() {
+  if (!s.ws) {
+    notice('Open a repository first');
+    return;
+  }
+  if (!pending().length) {
+    s.panel = 'review';
+    render();
+    notice('Add a comment before sending');
+    return;
+  }
+  s.showSend = true;
+  render();
+}
+async function dispatchReview() {
+  const p = document.querySelector<HTMLSelectElement>('#provider')?.value || 'codex-app';
+  const session = document.querySelector<HTMLInputElement>('#session-id')?.value.trim() || '';
+  if (!session) {
+    notice('Enter the session ID');
+    return;
+  }
+  localStorage.setItem('rtc-provider', p);
+  localStorage.setItem('rtc-session', session);
+  const executable = document.querySelector<HTMLInputElement>('#executable')?.value.trim() || '';
+  localStorage.setItem('rtc-executable', executable);
+  try {
+    await invoke('send_review', {
+      provider: p,
+      sessionId: session,
+      executable: executable || null,
+    });
+    s.showSend = false;
+    s.job = {
+      running: true,
+      message: 'Sending review to AI session…',
+      output: '',
+      workspaceRoot: s.ws?.root || null,
+    };
+    render();
+    pollJob();
+  } catch (e) {
+    notice(String(e));
+  }
+}
+async function pollJob() {
+  const timer = setInterval(async () => {
+    try {
+      s.job = await invoke<Job>('job_status');
+      if (!s.job.running) {
+        clearInterval(timer);
+        if (s.job.workspaceRoot === s.ws?.root) {
+          await refresh();
+          notice(s.job.message);
+        }
+        if (s.job.output) console.info('AI review response:', s.job.output);
+      } else render();
+    } catch (e) {
+      clearInterval(timer);
+      notice(String(e));
+    }
+  }, 1200);
+}
+app.addEventListener('click', async (e) => {
+  const t = (e.target as HTMLElement).closest<HTMLElement>(
+    '[data-action],[data-open],[data-diff],[data-stage],[data-close],[data-panel],[data-delete],[data-jump],[data-result],[data-line]',
+  );
+  if (!t) return;
+  if (t.dataset.open) {
+    await openFile(t.dataset.open);
+    return;
+  }
+  if (t.dataset.diff) {
+    await showDiff(t.dataset.diff);
+    return;
+  }
+  if (t.dataset.stage) {
+    await stage(
+      t.dataset.stage,
+      !(changed(t.dataset.stage)?.index.trim() && changed(t.dataset.stage)?.index !== '?'),
+    );
+    return;
+  }
+  if (t.dataset.close) {
+    closeTab(t.dataset.close);
+    return;
+  }
+  if (t.dataset.panel) {
+    s.panel = t.dataset.panel as typeof s.panel;
+    render();
+    return;
+  }
+  if (t.dataset.delete) {
+    try {
+      s.ws!.comments = await invoke<Comment[]>('delete_comment', { id: t.dataset.delete });
+      render();
+    } catch (e) {
+      notice(String(e));
+    }
+    return;
+  }
+  if (t.dataset.result) {
+    const m = t.dataset.result.match(/^(.*):(\d+)$/);
+    if (m) {
+      await openFile(m[1]);
+      s.selectedLine = +m[2];
+      render();
+      document.querySelector(`[data-line=\"${m[2]}\"]`)?.scrollIntoView({ block: 'center' });
+    }
+    return;
+  }
+  if (t.dataset.jump) {
+    const m = t.dataset.jump.match(/^(.*):(\d+)$/);
+    if (m) {
+      await openFile(m[1]);
+      s.selectedLine = +m[2];
+      render();
+      document.querySelector(`[data-line="${m[2]}"]`)?.scrollIntoView({ block: 'center' });
+    }
+    return;
+  }
+  if (t.dataset.line) {
+    s.selectedLine = +t.dataset.line;
+    s.selectedSide = t.dataset.side || 'file';
+    document
+      .querySelectorAll('.code-row.selected')
+      .forEach((el) => el.classList.remove('selected'));
+    t.classList.add('selected');
+    return;
+  }
+  switch (t.dataset.action) {
+    case 'open':
+      await choose();
+      break;
+    case 'refresh':
+      await refresh();
+      if (s.mode === 'diff' && s.active) await showDiff(s.active, s.staged);
+      break;
+    case 'sidebar':
+      s.sidebar = !s.sidebar;
+      render();
+      break;
+    case 'quick':
+      s.quick = true;
+      s.query = '';
+      render();
+      break;
+    case 'shortcuts':
+      s.shortcuts = true;
+      render();
+      break;
+    case 'file':
+      s.mode = 'file';
+      s.preview = false;
+      render();
+      break;
+    case 'preview':
+      s.mode = 'file';
+      s.preview = true;
+      render();
+      break;
+    case 'diff':
+      if (s.active) await showDiff(s.active);
+      break;
+    case 'staged-diff':
+      if (s.active) await showDiff(s.active, true);
+      break;
+    case 'comment':
+      if (ext(s.active || '') === 'md' && s.preview) {
+        s.preview = false;
+        s.mode = 'file';
+      }
+      s.showComposer = true;
+      s.draft = '';
+      render();
+      break;
+    case 'save-comment': {
+      s.draft = document.querySelector<HTMLTextAreaElement>('#comment-body')?.value || '';
+      if (!s.draft.trim()) {
+        notice('Write a comment first');
+        return;
+      }
+      try {
+        s.ws!.comments = await invoke<Comment[]>('add_comment', {
+          path: s.active,
+          line: s.selectedLine,
+          side: s.selectedSide,
+          body: s.draft,
+          anchor:
+            (document.querySelector<HTMLElement>('.code-row.selected code')?.textContent || '')
+              .trim()
+              .replace(/^[-+]/, '')
+              .slice(0, 400) || null,
+        });
+        s.showComposer = false;
+        s.panel = 'review';
+        s.draft = '';
+        render();
+      } catch (e) {
+        notice(String(e));
+      }
+      break;
+    }
+    case 'send':
+      await sendReview();
+      break;
+    case 'dispatch':
+      await dispatchReview();
+      break;
+    case 'close-overlay':
+      if (e.target !== t) break;
+      s.quick = false;
+      s.showComposer = false;
+      s.showSend = false;
+      s.shortcuts = false;
+      s.find = false;
+      render();
+      break;
+  }
+});
+app.addEventListener('input', (e) => {
+  const t = e.target as HTMLInputElement;
+  if (t.id === 'quick-input') {
+    s.query = t.value;
+    if (t.value.startsWith('#')) {
+      queueSearchCode(t.value.slice(1));
+      document.querySelector('.palette-results')!.innerHTML =
+        '<div class="empty-small">Searching code…</div>';
+    } else {
+      const list =
+        s.ws?.files.filter((f) => f.toLowerCase().includes(s.query.toLowerCase())).slice(0, 40) ||
+        [];
+      document.querySelector('.palette-results')!.innerHTML =
+        list
+          .map(
+            (p, i) =>
+              `<button class="palette-result ${i === 0 ? 'first' : ''}" data-open="${esc(p)}"><span>◇</span><span>${esc(basename(p))}<small>${esc(p)}</small></span></button>`,
+          )
+          .join('') || '<div class="empty-small">No files found</div>';
+    }
+  }
+  if (t.id === 'filter-files') {
+    s.query = t.value;
+    document
+      .querySelector('.sidebar-content')!
+      .querySelectorAll('.tree-item')
+      .forEach((el) => el.remove());
+    const input = document.querySelector<HTMLInputElement>('#filter-files');
+    const position = input?.selectionStart || 0;
+    render();
+    const next = document.querySelector<HTMLInputElement>('#filter-files');
+    next?.focus();
+    next?.setSelectionRange(position, position);
+  }
+});
+let searchSerial = 0;
+let searchTimer = 0;
+function queueSearchCode(q: string) {
+  window.clearTimeout(searchTimer);
+  if (q.trim().length < 2) {
+    searchSerial++;
+    s.results = [];
+    render();
+    return;
+  }
+  searchTimer = window.setTimeout(() => void searchCode(q), 250);
+}
+async function searchCode(q: string) {
+  const id = ++searchSerial;
+  if (q.trim().length < 2) {
+    s.results = [];
+    render();
+    return;
+  }
+  try {
+    const results = await invoke<SearchHit[]>('search_content', { query: q });
+    if (id === searchSerial && s.quick && s.query.startsWith('#')) {
+      s.results = results;
+      const input = document.querySelector<HTMLInputElement>('#quick-input');
+      const pos = input?.selectionStart || 0;
+      render();
+      const next = document.querySelector<HTMLInputElement>('#quick-input');
+      next?.setSelectionRange(pos, pos);
+    }
+  } catch (e) {
+    if (id === searchSerial) notice(String(e));
+  }
+}
+let lastShift = 0;
+window.addEventListener('keydown', (e) => {
+  const mod = navigator.platform.includes('Mac') ? e.metaKey : e.ctrlKey;
+  const isInput = (e.target as HTMLElement)?.matches('input,textarea');
+  if (e.key === 'Shift' && !e.repeat) {
+    const now = Date.now();
+    if (now - lastShift < 420) {
+      e.preventDefault();
+      s.quick = true;
+      s.query = '';
+      render();
+      lastShift = 0;
+    } else lastShift = now;
+    return;
+  }
+  if (e.key === 'Escape') {
+    s.quick = false;
+    s.showComposer = false;
+    s.showSend = false;
+    s.shortcuts = false;
+    s.find = false;
+    render();
+    return;
+  }
+  if (s.quick) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const items = Array.from(document.querySelectorAll<HTMLElement>('.palette-result'));
+      if (items.length) {
+        const current = Math.max(
+          0,
+          items.findIndex((i) => i.classList.contains('first')),
+        );
+        items[current].classList.remove('first');
+        const next = (current + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[next].classList.add('first');
+        items[next].scrollIntoView({ block: 'nearest' });
+      }
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const first = document.querySelector<HTMLElement>('.palette-result.first');
+      const p = first?.dataset.open;
+      if (p) openFile(p);
+      else first?.click();
+    }
+    return;
+  }
+  if (isInput && e.key !== 'Tab') return;
+  if (e.key === 'F12') {
+    e.preventDefault();
+    const word = window.getSelection()?.toString().trim();
+    if (word) {
+      s.quick = true;
+      s.query = '#' + word;
+      s.results = [];
+      render();
+      searchCode(word);
+    }
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    s.find = true;
+    render();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'l') {
+    e.preventDefault();
+    s.sidebar = !s.sidebar;
+    render();
+    return;
+  }
+  if (mod && e.key === '/') {
+    e.preventDefault();
+    s.shortcuts = true;
+    render();
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'w') {
+    e.preventDefault();
+    if (s.active) closeTab(s.active);
+    return;
+  }
+  if (e.ctrlKey && e.key === 'Tab') {
+    e.preventDefault();
+    switchTab(e.shiftKey ? -1 : 1);
+    return;
+  }
+  if (mod && e.altKey && e.key === 'ArrowLeft') {
+    e.preventDefault();
+    navigate(-1);
+    return;
+  }
+  if (mod && e.altKey && e.key === 'ArrowRight') {
+    e.preventDefault();
+    navigate(1);
+    return;
+  }
+  if (mod && e.key.toLowerCase() === 'o') {
+    e.preventDefault();
+    choose();
+  }
+});
+render();
+const saved = localStorage.getItem('rtc-root');
+if (saved) openWorkspace(saved);
