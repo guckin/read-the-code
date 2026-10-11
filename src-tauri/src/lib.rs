@@ -18,10 +18,10 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, String> 
 }
 
 #[derive(Default)]
-struct AppState { root: Mutex<Option<PathBuf>>, job: Mutex<Job> }
+struct AppState { root: Mutex<Option<PathBuf>>, job: Mutex<Job>, comments_lock: Mutex<()> }
 #[derive(Default, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct Job { running: bool, message: String, output: String }
+struct Job { running: bool, message: String, output: String, workspace_root: Option<String> }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Workspace { root: String, branch: String, files: Vec<String>, changes: Vec<Change>, comments: Vec<ReviewComment> }
@@ -33,7 +33,7 @@ struct Change { path: String, index: String, worktree: String }
 struct FileData { path: String, content: String, lines: usize }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ReviewComment { id: String, path: String, line: usize, side: String, body: String, created_at: String, sent: bool }
+struct ReviewComment { id: String, path: String, line: usize, side: String, body: String, created_at: String, sent: bool, #[serde(default)] anchor: Option<String> }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git").args(args).current_dir(root).output().map_err(|e| e.to_string())?;
@@ -79,19 +79,28 @@ fn execute_with_timeout(mut command: Command, input: Option<Vec<u8>>) -> Result<
 fn root(state: &State<'_, AppState>) -> Result<PathBuf, String> {
     state.root.lock().map_err(|e| e.to_string())?.clone().ok_or("Open a Git repository first".to_string())
 }
+fn validate_relative_path(rel: &str) -> Result<(), String> {
+    let path = Path::new(rel);
+    if rel.is_empty() || path.components().any(|c| !matches!(c, Component::Normal(_)))
+        || path.components().any(|c| c.as_os_str() == ".git")
+    {
+        return Err("Invalid repository path".into());
+    }
+    Ok(())
+}
 fn safe_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    validate_relative_path(rel)?;
     let candidate = root.join(rel);
     let path = candidate.canonicalize().map_err(|e| e.to_string())?;
-    if !path.starts_with(root) || !path.is_file() { return Err("File is outside the workspace".into()); }
+    if !path.starts_with(root) || !path.is_file()
+        || path.components().any(|c| c.as_os_str() == ".git")
+    { return Err("File is outside the workspace".into()); }
     Ok(path)
 }
 fn valid_repo_path(root: &Path, rel: &str) -> Result<(), String> {
-    let path = Path::new(rel);
-    if rel.is_empty() || path.components().any(|c| !matches!(c, Component::Normal(_))) {
-        return Err("Invalid repository path".into());
-    }
+    validate_relative_path(rel)?;
     if root.join(rel).exists() { safe_path(root, rel)?; return Ok(()); }
-    git(root, &["ls-files", "--error-unmatch", "--", rel]).map(|_| ())
+    git(root, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).map(|_| ())
 }
 fn review_path(root: &Path) -> Result<PathBuf, String> {
     let path = git(root, &["rev-parse", "--git-path", "read-the-code/reviews.json"])?;
@@ -174,8 +183,8 @@ fn search_content(query: String, state: State<'_, AppState>) -> Result<Vec<Searc
 fn read_file(path: String, state: State<'_, AppState>) -> Result<FileData, String> {
     let root = root(&state)?;
     let path_on_disk = safe_path(&root, &path)?;
+    if fs::metadata(&path_on_disk).map_err(|e| e.to_string())?.len() > 3_000_000 { return Err("File is over 3 MB".into()); }
     let data = fs::read(path_on_disk).map_err(|e| e.to_string())?;
-    if data.len() > 3_000_000 { return Err("File is over 3 MB".into()); }
     if data.contains(&0) { return Err("Binary files cannot be displayed".into()); }
     let content = String::from_utf8(data).map_err(|_| "File is not UTF-8".to_string())?;
     let lines = content.lines().count().max(1);
@@ -185,13 +194,13 @@ fn read_file(path: String, state: State<'_, AppState>) -> Result<FileData, Strin
 fn read_diff(path: String, staged: bool, state: State<'_, AppState>) -> Result<String, String> {
     let root = root(&state)?;
     valid_repo_path(&root, &path)?;
-    let mut args = vec!["diff", "--no-ext-diff", "--no-color"];
+    let mut args = vec!["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color"];
     if staged { args.push("--cached"); }
     args.extend(["--", &path]);
     let diff = git(&root, &args)?;
     if !diff.is_empty() || staged { return Ok(diff); }
     // An untracked file has no regular git diff. Build a normal unified diff without a shell.
-    let tracked = git(&root, &["ls-files", "--error-unmatch", "--", &path]).is_ok();
+    let tracked = git(&root, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", &path]).is_ok();
     if tracked { return Ok(diff); }
     let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let out = Command::new("git").args(["diff", "--no-index", "--no-color", "--", null_device, &path]).current_dir(&root).output().map_err(|e| e.to_string())?;
@@ -201,24 +210,26 @@ fn read_diff(path: String, staged: bool, state: State<'_, AppState>) -> Result<S
 fn stage_file(path: String, stage: bool, state: State<'_, AppState>) -> Result<Workspace, String> {
     let root = root(&state)?;
     valid_repo_path(&root, &path)?;
-    if stage { git(&root, &["add", "--", &path])?; }
-    else { git(&root, &["restore", "--staged", "--", &path])?; }
+    if stage { git(&root, &["--literal-pathspecs", "add", "--", &path])?; }
+    else { git(&root, &["--literal-pathspecs", "restore", "--staged", "--", &path])?; }
     snapshot(&root)
 }
 #[tauri::command]
-fn add_comment(path: String, line: usize, side: String, body: String, state: State<'_, AppState>) -> Result<Vec<ReviewComment>, String> {
+fn add_comment(path: String, line: usize, side: String, body: String, anchor: Option<String>, state: State<'_, AppState>) -> Result<Vec<ReviewComment>, String> {
     let root = root(&state)?;
+    let _guard = state.comments_lock.lock().map_err(|e| e.to_string())?;
     valid_repo_path(&root, &path)?;
     if line == 0 || body.trim().is_empty() || body.len() > 20_000 { return Err("Add a comment of at most 20,000 characters on a line".into()); }
     if side != "file" && side != "new" && side != "old" { return Err("Invalid diff side".into()); }
     let mut comments = load_comments(&root)?;
-    comments.push(ReviewComment { id: format!("{}-{}", chrono::Utc::now().timestamp_millis(), comments.len()), path, line, side, body: body.trim().to_string(), created_at: chrono::Utc::now().to_rfc3339(), sent: false });
+    comments.push(ReviewComment { id: format!("{}-{}", chrono::Utc::now().timestamp_millis(), comments.len()), path, line, side, body: body.trim().to_string(), created_at: chrono::Utc::now().to_rfc3339(), sent: false, anchor: anchor.map(|value| value.chars().take(400).collect()).filter(|value: &String| !value.is_empty()) });
     save_comments(&root, &comments)?;
     Ok(comments)
 }
 #[tauri::command]
 fn delete_comment(id: String, state: State<'_, AppState>) -> Result<Vec<ReviewComment>, String> {
     let root = root(&state)?;
+    let _guard = state.comments_lock.lock().map_err(|e| e.to_string())?;
     let mut comments = load_comments(&root)?;
     comments.retain(|c| c.id != id || c.sent);
     save_comments(&root, &comments)?;
@@ -231,15 +242,18 @@ fn send_review(provider: String, session_id: String, executable: Option<String>,
     let root = root(&state)?;
     if provider != "codex" && provider != "codex-app" && provider != "claude" { return Err("Choose Codex app, Codex CLI, or Claude Code".into()); }
     if session_id.trim().is_empty() { return Err("Enter the session ID".into()); }
-    let mut comments = load_comments(&root)?;
-    let pending: Vec<_> = comments.iter().filter(|c| !c.sent).cloned().collect();
+    let pending: Vec<_> = {
+        let _guard = state.comments_lock.lock().map_err(|e| e.to_string())?;
+        load_comments(&root)?.into_iter().filter(|c| !c.sent).collect()
+    };
     if pending.is_empty() { return Err("There are no unsent comments".into()); }
-    let prompt = format!("Please address this batch of local code review comments in the current repository. Inspect the referenced code and diffs, make the requested changes, and summarize what you changed. Comments:\n\n{}", pending.iter().enumerate().map(|(i,c)| format!("{}. {}:{} [{}]\n{}", i+1, c.path, c.line, c.side, c.body)).collect::<Vec<_>>().join("\n\n"));
+    let workspace_root = root.to_string_lossy().into_owned();
+    let prompt = format!("Please address this batch of local code review comments in the current repository. Inspect the referenced code and diffs, verify each line against the included excerpt because code may have moved, make the requested changes, and summarize what you changed. Comments:\n\n{}", pending.iter().enumerate().map(|(i,c)| format!("{}. {}:{} [{}]{}\n{}", i+1, c.path, c.line, c.side, c.anchor.as_deref().map(|a| format!("\nCode at review time: {a}")).unwrap_or_default(), c.body)).collect::<Vec<_>>().join("\n\n"));
     if prompt.len() > MAX_REVIEW_PROMPT_BYTES { return Err("Review batch is over 1 MB; split it into smaller batches".into()); }
     {
         let mut job = state.job.lock().map_err(|e| e.to_string())?;
         if job.running { return Err("A review is already running".into()); }
-        *job = Job { running: true, message: "Sending review to AI session…".into(), output: String::new() };
+        *job = Job { running: true, message: "Sending review to AI session…".into(), output: String::new(), workspace_root: Some(workspace_root) };
     }
     std::thread::spawn(move || {
         let result = (|| -> Result<String, String> {
@@ -274,8 +288,13 @@ fn send_review(provider: String, session_id: String, executable: Option<String>,
             job.running = false;
             match result {
                 Ok(output) => {
-                    for comment in &mut comments { if pending.iter().any(|p| p.id == comment.id) { comment.sent = true; } }
-                    match save_comments(&root, &comments) {
+                    let save_result = (|| {
+                        let _guard = state.comments_lock.lock().map_err(|e| e.to_string())?;
+                        let mut current = load_comments(&root)?;
+                        for comment in &mut current { if pending.iter().any(|p| p.id == comment.id) { comment.sent = true; } }
+                        save_comments(&root, &current)
+                    })();
+                    match save_result {
                         Ok(()) => { job.message = if provider == "codex-app" { format!("Queued {} comments in Codex app", pending.len()) } else { format!("Sent {} comments to {provider}", pending.len()) }; job.output = output; }
                         Err(e) => { job.message = format!("AI replied, but saving sent status failed: {e}"); job.output = output; }
                     }
@@ -309,7 +328,7 @@ mod tests {
         assert!(snapshot.files.contains(&"hello.rs".to_string()));
         assert_eq!(snapshot.changes[0].path, "hello.rs");
         assert_eq!(snapshot.changes[0].index, "?");
-        let comments = vec![ReviewComment { id:"one".into(), path:"hello.rs".into(), line:1, side:"file".into(), body:"Check this".into(), created_at:"now".into(), sent:false }];
+        let comments = vec![ReviewComment { id:"one".into(), path:"hello.rs".into(), line:1, side:"file".into(), body:"Check this".into(), created_at:"now".into(), sent:false, anchor:None }];
         save_comments(root, &comments).unwrap();
         assert_eq!(load_comments(root).unwrap()[0].body, "Check this");
         assert!(!root.join("read-the-code").exists());
