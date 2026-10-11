@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111318" />
+    <meta name="description" content="Read the Code is a quiet desktop space for reviewing local code, Markdown, and Git diffs before you commit." />
+    <title>Read the Code — Local code review for AI workflows</title>
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="site-header wrap">
+      <a class="brand" href="./" aria-label="Read the Code home"><span class="brand-mark">⌘</span><span>Read the Code</span></a>
+      <nav aria-label="Main navigation"><a href="#how-it-works">How it works</a><a href="https://github.com/guckin/read-the-code">GitHub ↗</a></nav>
+    </header>
+
+    <main>
+      <section class="hero wrap">
+        <div class="hero-copy">
+          <span class="eyebrow"><span class="status-dot"></span> A local review space for AI-generated code</span>
+          <h1>Read carefully.<br /><span>Respond once.</span></h1>
+          <p>Explore a repository, inspect Git diffs, and leave comments right on the code. Send your whole review to Codex or Claude Code only when you’re ready.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/guckin/read-the-code/releases/latest/download/Read-the-Code-macOS-arm64.dmg">Download for macOS <span aria-hidden="true">↗</span></a>
+            <a class="button secondary" href="https://github.com/guckin/read-the-code/releases/latest">View latest release</a>
+          </div>
+          <div class="download-note">Apple Silicon · Free download · Local Git repositories</div>
+          <p class="signing-note">This preview is not yet signed or notarized. macOS may block the first launch; see <a href="https://support.apple.com/en-us/102445">Apple’s instructions</a> for opening an app you trust.</p>
+        </div>
+
+        <div class="app-preview" role="img" aria-label="Preview of Read the Code with a Git diff and queued review comments">
+          <div class="preview-titlebar"><span class="window-dots"><i></i><i></i><i></i></span><span class="preview-brand">⌘ &nbsp; Read the Code</span><span class="preview-search">⌕ &nbsp; Search Everywhere &nbsp; ⇧ ⇧</span></div>
+          <div class="preview-body">
+            <aside class="preview-sidebar"><div class="preview-tabs"><b>Files</b><b class="chosen">Changes <small>3</small></b><b>Review</b></div><div class="section-label">WORKING TREE</div><div class="preview-file selected"><span>M</span> src/review.rs</div><div class="preview-file"><span>M</span> src/session.rs</div><div class="preview-file"><span>U</span> README.md</div></aside>
+            <div class="preview-editor"><div class="preview-tab">review.rs <span>×</span></div><div class="preview-path">read-the-code <span>›</span> src <span>›</span> review.rs <b>Working diff</b></div><div class="preview-code"><div class="line hunk"><em></em><code>@@ -42,6 +42,9 @@</code></div><div class="line"><em>42</em><code>fn collect_comments(repo: &amp;Path) -&gt; Review {</code></div><div class="line"><em>43</em><code>    let comments = load_comments(repo)?;</code></div><div class="line removed"><em>44</em><code>-   send_each_comment(comments);</code></div><div class="line added"><em>44</em><code>+   let batch = group_comments(comments);</code></div><div class="line added"><em>45</em><code>+   queue_review(batch);</code></div><div class="line"><em>46</em><code>    Ok(Review::complete())</code></div><div class="line"><em>47</em><code>}</code></div></div><div class="preview-comment"><div><span class="comment-avatar">⌘</span><strong>Review comment</strong><small>review.rs:45</small></div><p>Can we keep these comments local until I press Send review?</p></div></div>
+          </div>
+          <div class="preview-footer"><span>⌁ &nbsp; main</span><span>2 comments queued locally</span><span class="preview-send">Send review &nbsp; 2</span></div>
+        </div>
+      </section>
+
+      <section id="how-it-works" class="features wrap"><div class="section-heading"><span class="eyebrow">BUILT FOR THE REVIEW LOOP</span><h2>Everything you need to look closer.</h2></div><div class="feature-grid"><article><span class="feature-icon">⌕</span><h3>Find your way around</h3><p>Search files and code, move between tabs, and navigate with familiar IntelliJ style shortcuts.</p></article><article><span class="feature-icon">±</span><h3>See what changed</h3><p>Read source, Markdown previews, working tree diffs, and staged diffs in one focused window.</p></article><article><span class="feature-icon">▤</span><h3>Review in one batch</h3><p>Pin comments to lines, gather your thoughts, then send the full review to a Codex app chat, Codex CLI, or Claude Code session.</p></article></div></section>
+
+      <section class="final-cta wrap"><div><span class="eyebrow">START REVIEWING</span><h2>Keep the feedback loop local.</h2><p>Open a repository and make your next AI code review feel as direct as reading the code.</p></div><a class="button primary" href="https://github.com/guckin/read-the-code/releases/latest/download/Read-the-Code-macOS-arm64.dmg">Download for macOS <span aria-hidden="true">↗</span></a></section>
+    </main>
+
+    <footer class="site-footer wrap"><span>⌘ &nbsp; Read the Code</span><span>Built for thoughtful local review.</span><a href="https://github.com/guckin/read-the-code">Source on GitHub ↗</a></footer>
+  </body>
+</html>
