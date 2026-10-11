@@ -28,19 +28,28 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 fn root(state: &State<'_, AppState>) -> Result<PathBuf, String> {
     state.root.lock().map_err(|e| e.to_string())?.clone().ok_or("Open a Git repository first".to_string())
 }
+fn validate_relative_path(rel: &str) -> Result<(), String> {
+    let path = Path::new(rel);
+    if rel.is_empty() || path.components().any(|c| !matches!(c, Component::Normal(_)))
+        || path.components().any(|c| c.as_os_str() == ".git")
+    {
+        return Err("Invalid repository path".into());
+    }
+    Ok(())
+}
 fn safe_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    validate_relative_path(rel)?;
     let candidate = root.join(rel);
     let path = candidate.canonicalize().map_err(|e| e.to_string())?;
-    if !path.starts_with(root) || !path.is_file() { return Err("File is outside the workspace".into()); }
+    if !path.starts_with(root) || !path.is_file()
+        || path.components().any(|c| c.as_os_str() == ".git")
+    { return Err("File is outside the workspace".into()); }
     Ok(path)
 }
 fn valid_repo_path(root: &Path, rel: &str) -> Result<(), String> {
-    let path = Path::new(rel);
-    if rel.is_empty() || path.components().any(|c| !matches!(c, Component::Normal(_))) {
-        return Err("Invalid repository path".into());
-    }
+    validate_relative_path(rel)?;
     if root.join(rel).exists() { safe_path(root, rel)?; return Ok(()); }
-    git(root, &["ls-files", "--error-unmatch", "--", rel]).map(|_| ())
+    git(root, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", rel]).map(|_| ())
 }
 fn review_path(root: &Path) -> Result<PathBuf, String> {
     let path = git(root, &["rev-parse", "--git-path", "read-the-code/reviews.json"])?;
@@ -123,8 +132,8 @@ fn search_content(query: String, state: State<'_, AppState>) -> Result<Vec<Searc
 fn read_file(path: String, state: State<'_, AppState>) -> Result<FileData, String> {
     let root = root(&state)?;
     let path_on_disk = safe_path(&root, &path)?;
+    if fs::metadata(&path_on_disk).map_err(|e| e.to_string())?.len() > 3_000_000 { return Err("File is over 3 MB".into()); }
     let data = fs::read(path_on_disk).map_err(|e| e.to_string())?;
-    if data.len() > 3_000_000 { return Err("File is over 3 MB".into()); }
     if data.contains(&0) { return Err("Binary files cannot be displayed".into()); }
     let content = String::from_utf8(data).map_err(|_| "File is not UTF-8".to_string())?;
     let lines = content.lines().count().max(1);
@@ -134,13 +143,13 @@ fn read_file(path: String, state: State<'_, AppState>) -> Result<FileData, Strin
 fn read_diff(path: String, staged: bool, state: State<'_, AppState>) -> Result<String, String> {
     let root = root(&state)?;
     valid_repo_path(&root, &path)?;
-    let mut args = vec!["diff", "--no-ext-diff", "--no-color"];
+    let mut args = vec!["--literal-pathspecs", "diff", "--no-ext-diff", "--no-color"];
     if staged { args.push("--cached"); }
     args.extend(["--", &path]);
     let diff = git(&root, &args)?;
     if !diff.is_empty() || staged { return Ok(diff); }
     // An untracked file has no regular git diff. Build a normal unified diff without a shell.
-    let tracked = git(&root, &["ls-files", "--error-unmatch", "--", &path]).is_ok();
+    let tracked = git(&root, &["--literal-pathspecs", "ls-files", "--error-unmatch", "--", &path]).is_ok();
     if tracked { return Ok(diff); }
     let out = Command::new("git").args(["diff", "--no-index", "--no-color", "--", "/dev/null", &path]).current_dir(&root).output().map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -149,8 +158,8 @@ fn read_diff(path: String, staged: bool, state: State<'_, AppState>) -> Result<S
 fn stage_file(path: String, stage: bool, state: State<'_, AppState>) -> Result<Workspace, String> {
     let root = root(&state)?;
     valid_repo_path(&root, &path)?;
-    if stage { git(&root, &["add", "--", &path])?; }
-    else { git(&root, &["restore", "--staged", "--", &path])?; }
+    if stage { git(&root, &["--literal-pathspecs", "add", "--", &path])?; }
+    else { git(&root, &["--literal-pathspecs", "restore", "--staged", "--", &path])?; }
     snapshot(&root)
 }
 #[tauri::command]
