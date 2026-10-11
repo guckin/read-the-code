@@ -38,9 +38,9 @@ The download page is in `docs/` and published with GitHub Pages. Its download bu
 npm run release:macos
 ```
 
-The script builds the app and DMG, tags the current commit, and uploads the DMG to GitHub Releases under a stable asset name. The site then links to that release automatically.
+The script builds the app and DMG in a local cache, verifies the app signature in the mounted DMG, tags the current commit, and uploads the DMG to GitHub Releases under a stable asset name. The site then links to that release automatically.
 
-The current macOS build is unsigned and unnotarized because no Apple Developer signing identity is configured. GitHub Pages labels this clearly and links to [Apple's guidance](https://support.apple.com/en-us/102445) for opening an app from a source you trust.
+The macOS build uses an ad hoc signature because no Apple Developer signing identity is configured. It is not notarized. GitHub Pages labels this clearly and links to [Apple's guidance](https://support.apple.com/en-us/102445) for opening an app from a source you trust.
 
 ## Navigation
 

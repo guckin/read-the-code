@@ -1,15 +1,33 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Read the Code",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.stephenmcguckin.readthecode",
-  "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
   "app": {
-    "windows": [{ "title": "Read the Code", "width": 1440, "height": 900, "minWidth": 900, "minHeight": 600, "backgroundColor": "#111318" }],
+    "windows": [
+      {
+        "title": "Read the Code",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "backgroundColor": "#111318"
+      }
+    ],
     "security": {
       "csp": "default-src 'self' customprotocol: asset:; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self';",
       "devCsp": "default-src 'self' customprotocol: asset:; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self';"
     }
   },
-  "bundle": { "active": true, "targets": "all" }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "macOS": { "signingIdentity": "-" }
+  }
 }

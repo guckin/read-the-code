@@ -3,10 +3,10 @@ use std::{fs, io::Write, path::{Component, Path, PathBuf}, process::{Command, St
 use tauri::{Manager, State};
 
 #[derive(Default)]
-struct AppState { root: Mutex<Option<PathBuf>>, job: Mutex<Job> }
+struct AppState { root: Mutex<Option<PathBuf>>, job: Mutex<Job>, comments_lock: Mutex<()> }
 #[derive(Default, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct Job { running: bool, message: String, output: String }
+struct Job { running: bool, message: String, output: String, workspace_root: Option<String> }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Workspace { root: String, branch: String, files: Vec<String>, changes: Vec<Change>, comments: Vec<ReviewComment> }
@@ -18,7 +18,7 @@ struct Change { path: String, index: String, worktree: String }
 struct FileData { path: String, content: String, lines: usize }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ReviewComment { id: String, path: String, line: usize, side: String, body: String, created_at: String, sent: bool }
+struct ReviewComment { id: String, path: String, line: usize, side: String, body: String, created_at: String, sent: bool, #[serde(default)] anchor: Option<String> }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git").args(args).current_dir(root).output().map_err(|e| e.to_string())?;
@@ -163,19 +163,21 @@ fn stage_file(path: String, stage: bool, state: State<'_, AppState>) -> Result<W
     snapshot(&root)
 }
 #[tauri::command]
-fn add_comment(path: String, line: usize, side: String, body: String, state: State<'_, AppState>) -> Result<Vec<ReviewComment>, String> {
+fn add_comment(path: String, line: usize, side: String, body: String, anchor: Option<String>, state: State<'_, AppState>) -> Result<Vec<ReviewComment>, String> {
     let root = root(&state)?;
+    let _guard = state.comments_lock.lock().map_err(|e| e.to_string())?;
     valid_repo_path(&root, &path)?;
     if line == 0 || body.trim().is_empty() || body.len() > 20_000 { return Err("Add a comment of at most 20,000 characters on a line".into()); }
     if side != "file" && side != "new" && side != "old" { return Err("Invalid diff side".into()); }
     let mut comments = load_comments(&root)?;
-    comments.push(ReviewComment { id: format!("{}-{}", chrono::Utc::now().timestamp_millis(), comments.len()), path, line, side, body: body.trim().to_string(), created_at: chrono::Utc::now().to_rfc3339(), sent: false });
+    comments.push(ReviewComment { id: format!("{}-{}", chrono::Utc::now().timestamp_millis(), comments.len()), path, line, side, body: body.trim().to_string(), created_at: chrono::Utc::now().to_rfc3339(), sent: false, anchor: anchor.map(|value| value.chars().take(400).collect()).filter(|value: &String| !value.is_empty()) });
     save_comments(&root, &comments)?;
     Ok(comments)
 }
 #[tauri::command]
 fn delete_comment(id: String, state: State<'_, AppState>) -> Result<Vec<ReviewComment>, String> {
     let root = root(&state)?;
+    let _guard = state.comments_lock.lock().map_err(|e| e.to_string())?;
     let mut comments = load_comments(&root)?;
     comments.retain(|c| c.id != id || c.sent);
     save_comments(&root, &comments)?;
@@ -188,16 +190,19 @@ fn send_review(provider: String, session_id: String, executable: Option<String>,
     let root = root(&state)?;
     if provider != "codex" && provider != "codex-app" && provider != "claude" { return Err("Choose Codex app, Codex CLI, or Claude Code".into()); }
     if session_id.trim().is_empty() { return Err("Enter the session ID".into()); }
-    let mut comments = load_comments(&root)?;
-    let pending: Vec<_> = comments.iter().filter(|c| !c.sent).cloned().collect();
+    let pending: Vec<_> = {
+        let _guard = state.comments_lock.lock().map_err(|e| e.to_string())?;
+        load_comments(&root)?.into_iter().filter(|c| !c.sent).collect()
+    };
     if pending.is_empty() { return Err("There are no unsent comments".into()); }
+    let workspace_root = root.to_string_lossy().into_owned();
     {
         let mut job = state.job.lock().map_err(|e| e.to_string())?;
         if job.running { return Err("A review is already running".into()); }
-        *job = Job { running: true, message: "Sending review to AI session…".into(), output: String::new() };
+        *job = Job { running: true, message: "Sending review to AI session…".into(), output: String::new(), workspace_root: Some(workspace_root) };
     }
     std::thread::spawn(move || {
-        let prompt = format!("Please address this batch of local code review comments in the current repository. Inspect the referenced code and diffs, make the requested changes, and summarize what you changed. Comments:\n\n{}", pending.iter().enumerate().map(|(i,c)| format!("{}. {}:{} [{}]\n{}", i+1, c.path, c.line, c.side, c.body)).collect::<Vec<_>>().join("\n\n"));
+        let prompt = format!("Please address this batch of local code review comments in the current repository. Inspect the referenced code and diffs, verify each line against the included excerpt because code may have moved, make the requested changes, and summarize what you changed. Comments:\n\n{}", pending.iter().enumerate().map(|(i,c)| format!("{}. {}:{} [{}]\n{}{}", i+1, c.path, c.line, c.side, c.anchor.as_deref().map(|a| format!("\nCode at review time: {a}")).unwrap_or_default(), c.body)).collect::<Vec<_>>().join("\n\n"));
         let result = (|| -> Result<String, String> {
             let bundled_codex = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex";
             let program = executable.as_deref().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| {
@@ -230,8 +235,13 @@ fn send_review(provider: String, session_id: String, executable: Option<String>,
             job.running = false;
             match result {
                 Ok(output) => {
-                    for comment in &mut comments { if pending.iter().any(|p| p.id == comment.id) { comment.sent = true; } }
-                    match save_comments(&root, &comments) {
+                    let save_result = (|| {
+                        let _guard = state.comments_lock.lock().map_err(|e| e.to_string())?;
+                        let mut current = load_comments(&root)?;
+                        for comment in &mut current { if pending.iter().any(|p| p.id == comment.id) { comment.sent = true; } }
+                        save_comments(&root, &current)
+                    })();
+                    match save_result {
                         Ok(()) => { job.message = if provider == "codex-app" { format!("Queued {} comments in Codex app", pending.len()) } else { format!("Sent {} comments to {provider}", pending.len()) }; job.output = output; }
                         Err(e) => { job.message = format!("AI replied, but saving sent status failed: {e}"); job.output = output; }
                     }
@@ -265,7 +275,7 @@ mod tests {
         assert!(snapshot.files.contains(&"hello.rs".to_string()));
         assert_eq!(snapshot.changes[0].path, "hello.rs");
         assert_eq!(snapshot.changes[0].index, "?");
-        let comments = vec![ReviewComment { id:"one".into(), path:"hello.rs".into(), line:1, side:"file".into(), body:"Check this".into(), created_at:"now".into(), sent:false }];
+        let comments = vec![ReviewComment { id:"one".into(), path:"hello.rs".into(), line:1, side:"file".into(), body:"Check this".into(), created_at:"now".into(), sent:false, anchor:None }];
         save_comments(root, &comments).unwrap();
         assert_eq!(load_comments(root).unwrap()[0].body, "Check this");
         assert!(!root.join("read-the-code").exists());
