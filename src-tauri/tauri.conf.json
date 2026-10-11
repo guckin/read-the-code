@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Read the Code",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.stephenmcguckin.readthecode",
   "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
   "app": { "windows": [{ "title": "Read the Code", "width": 1440, "height": 900, "minWidth": 900, "minHeight": 600, "backgroundColor": "#111318" }], "security": { "csp": null } },
-  "bundle": { "active": true, "targets": "all" }
+  "bundle": { "active": true, "targets": "all", "macOS": { "signingIdentity": "-" } }
 }
