@@ -2,7 +2,7 @@
 
 A small Rust/Tauri desktop app for reading AI-generated code and Markdown before committing. The interface is intentionally read-only: edits stay with your coding agent. You can inspect Git changes, stage or unstage files, and queue line comments locally before sending one review batch.
 
-[Download the macOS Apple Silicon app](https://guckin.github.io/read-the-code/) · [Latest release](https://github.com/guckin/read-the-code/releases/latest)
+[Download the macOS Apple Silicon app](https://github.com/guckin/read-the-code/releases/latest)
 
 ## Run
 
@@ -32,15 +32,15 @@ The Codex app option queues a message into the selected desktop chat; the agent'
 
 ## Release
 
-The download page is in `docs/` and published with GitHub Pages. Its download button points to the latest GitHub Release asset. From a clean, pushed `main` branch on macOS, bump the version in both `package.json` and `src-tauri/tauri.conf.json`, then run:
+From a clean, pushed `main` branch on macOS, bump the version in both `package.json` and `src-tauri/tauri.conf.json`, then run:
 
 ```sh
 npm run release:macos
 ```
 
-The script builds the app and DMG in a local cache, verifies the app signature in the mounted DMG, tags the current commit, and uploads the DMG to GitHub Releases under a stable asset name. The site then links to that release automatically.
+The script builds the app and DMG in a local cache, verifies the app signature in the mounted DMG, tags the current commit, and uploads the DMG to GitHub Releases under a stable asset name.
 
-The macOS build uses an ad hoc signature because no Apple Developer signing identity is configured. It is not notarized. GitHub Pages labels this clearly and links to [Apple's guidance](https://support.apple.com/en-us/102445) for opening an app from a source you trust.
+The macOS build uses an ad hoc signature because no Apple Developer signing identity is configured. It is not notarized. See [Apple's guidance](https://support.apple.com/en-us/102445) for opening an app from a source you trust.
 
 ## Navigation
 

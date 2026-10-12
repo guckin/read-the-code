@@ -94,4 +94,3 @@ else
 fi
 
 echo "Release: https://github.com/$repo/releases/tag/$tag"
-echo "Site: https://guckin.github.io/read-the-code/"
